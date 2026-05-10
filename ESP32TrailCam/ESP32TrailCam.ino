@@ -95,6 +95,31 @@ const char* htmlPage = R"rawliteral(
 
 // --- Helper Functions ---
 
+void logHeartbeat() {
+  if (!SD_MMC.begin("/sdcard", true)) {
+    Serial.println("SD Card Mount Failed (Heartbeat)");
+    return;
+  }
+
+  time_t now;
+  struct tm timeinfo;
+  time(&now);
+  localtime_r(&now, &timeinfo);
+
+  char timeStr[30];
+  strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", &timeinfo);
+
+  File file = SD_MMC.open("/heartbeat.txt", FILE_APPEND);
+  if (!file) {
+    Serial.println("Failed to open heartbeat file");
+  } else {
+    file.printf("Heartbeat: %s\n", timeStr);
+    Serial.printf("Logged heartbeat: %s\n", timeStr);
+  }
+  file.close();
+  SD_MMC.end();
+}
+
 void saveToSD(camera_fb_t* fb) {
   // 1. Initialize SD Card in 1-bit mode
   if (!SD_MMC.begin("/sdcard", true)) {
@@ -135,7 +160,7 @@ void handleListFiles() {
   String output = "[";
   File file = root.openNextFile();
   while (file) {
-    if (String(file.name()).endsWith(".jpg")) {
+    if (String(file.name()).endsWith(".jpg") || String(file.name()).endsWith(".txt")) {
       if (output != "[") output += ",";
       output += "\"" + String(file.name()) + "\"";
     }
@@ -155,7 +180,11 @@ void handleDownload() {
     server.send(404, "text/plain", "Not Found");
     return;
   }
-  server.streamFile(file, "image/jpeg");
+  if (path.endsWith(".jpg")) {
+    server.streamFile(file, "image/jpeg");
+  } else {
+    server.streamFile(file, "text/plain");
+  }
   file.close();
   SD_MMC.end();
 }
@@ -181,14 +210,23 @@ void setup() {
   pinMode(RED_LED_PIN, OUTPUT);
 
   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
-  if (wakeup_reason == ESP_SLEEP_WAKEUP_EXT0 || wakeup_reason == ESP_SLEEP_WAKEUP_TIMER) {
+  
+  if (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER) {
     isMonitoring = true;
-    Serial.println("Wake to take photo");
-  } else {
-    Serial.println("Wake to Wifi Setup");
-
+    Serial.println("Wake: Hourly Heartbeat");
+    logHeartbeat();
+    sleepNow(); // Go back to sleep immediately after heartbeat
+  } 
+  else if (wakeup_reason == ESP_SLEEP_WAKEUP_EXT0) {
+    isMonitoring = true;
+    Serial.println("Wake: Motion Detected");
+    // Continue to camera initialization below
+  } 
+  else {
+    Serial.println("Wake: First Boot / Manual Reset");
     isMonitoring = false;
   }
+
   // 2.  Camera Configuration
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -217,6 +255,11 @@ void setup() {
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
     Serial.printf("Camera init failed with error 0x%x", err);
+    // If monitoring, we still want to log that we woke up but failed
+    if (isMonitoring) {
+        logHeartbeat(); 
+        sleepNow();
+    }
     return;
   }
 
@@ -298,9 +341,9 @@ void sleepNow() {
   // Using 1-bit SD mode frees up GPIO 13 for the PIR
   esp_sleep_enable_ext0_wakeup((gpio_num_t)PIR_SENSOR_PIN, 1);
 
-  //Uncomment for timed shots for testing
-  //uint64_t sleepTime = 5 * 1000000;  // 5 seconds
-  //esp_sleep_enable_timer_wakeup(sleepTime);
+  // Wake every hour (3600 seconds) to log heartbeat
+  uint64_t sleepTime = 3600ULL * 1000000ULL; 
+  esp_sleep_enable_timer_wakeup(sleepTime);
 
   Serial.println("Entering Deep Sleep");
   esp_deep_sleep_start();
