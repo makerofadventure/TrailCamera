@@ -6,6 +6,8 @@
 #include "soc/soc.h"           // Needed for WRITE_PERI_REG
 #include "soc/rtc_cntl_reg.h"  // Needed for RTC_CNTL_BROWN_OUT_REG
 #include <esp_wifi.h>
+#include <Preferences.h>
+#include "driver/rtc_io.h"
 // --- (Keep your existing Pin Definitions and Camera Config here) ---
 #define PWDN_GPIO_NUM 32
 #define RESET_GPIO_NUM -1
@@ -23,10 +25,23 @@
 #define VSYNC_GPIO_NUM 25
 #define HREF_GPIO_NUM 23
 #define PCLK_GPIO_NUM 22
-#define PIR_SENSOR_PIN GPIO_NUM_13
+#define PIR_SENSOR_PIN GPIO_NUM_12
 
 
-#define RED_LED_PIN 33
+#define FLASH_LED_PIN 4
+
+void blinkLED(int count, int durationMs = 200) {
+  pinMode(FLASH_LED_PIN, OUTPUT);
+  for (int i = 0; i < count; i++) {
+    analogWrite(FLASH_LED_PIN, 8);  // Very dim ON (PWM)
+    delay(durationMs);
+    analogWrite(FLASH_LED_PIN, 0);  // OFF
+    if (i < count - 1) {
+      delay(durationMs);
+    }
+  }
+  pinMode(FLASH_LED_PIN, INPUT);    // Release pin back to input
+}
 
 RTC_DATA_ATTR bool isMonitoring = false;
 WebServer server(80);
@@ -124,6 +139,7 @@ void saveToSD(camera_fb_t* fb) {
   // 1. Initialize SD Card in 1-bit mode
   if (!SD_MMC.begin("/sdcard", true)) {
     Serial.println("SD Card Mount Failed");
+    blinkLED(4, 300); // 4 slow blinks to show SD card mount failure
     return;
   }
 
@@ -141,9 +157,11 @@ void saveToSD(camera_fb_t* fb) {
   File file = SD_MMC.open(fileName, FILE_WRITE);
   if (!file) {
     Serial.println("Failed to open file for writing");
+    blinkLED(4, 300); // 4 slow blinks to show file write failure
   } else {
     file.write(fb->buf, fb->len);
     Serial.printf("Saved photo: %s\n", fileName);
+    blinkLED(2, 100); // 2 quick blinks to show success
   }
 
   // 5. Cleanup
@@ -207,24 +225,57 @@ void handleDeleteAll() {
 void setup() {
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);  // Disable brownout detector
   Serial.begin(115200);
-  pinMode(RED_LED_PIN, OUTPUT);
+  pinMode(FLASH_LED_PIN, INPUT);              // Keep flash LED as high-impedance INPUT by default
 
   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
   
   if (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER) {
     isMonitoring = true;
     Serial.println("Wake: Hourly Heartbeat");
+    blinkLED(1, 200); // 1 single blink for heartbeat
     logHeartbeat();
     sleepNow(); // Go back to sleep immediately after heartbeat
   } 
   else if (wakeup_reason == ESP_SLEEP_WAKEUP_EXT0) {
     isMonitoring = true;
     Serial.println("Wake: Motion Detected");
+    blinkLED(3, 100); // 3 quick blinks for motion detection
     // Continue to camera initialization below
   } 
   else {
     Serial.println("Wake: First Boot / Manual Reset");
-    isMonitoring = false;
+    Preferences preferences;
+    preferences.begin("trailcam", false);
+    bool wasSet = preferences.getBool("monitoring", false);
+    if (wasSet) {
+      Serial.println("Trailcam flag was set. Clearing temporarily...");
+      preferences.putBool("monitoring", false);
+
+      // Turn on white LED dimly to indicate the 1-second power-off window
+      pinMode(FLASH_LED_PIN, OUTPUT);
+      analogWrite(FLASH_LED_PIN, 15);   // Dim ON
+      delay(1000);
+      analogWrite(FLASH_LED_PIN, 0);    // OFF
+      pinMode(FLASH_LED_PIN, INPUT);
+
+      Serial.println("1 second elapsed without power-off. Resetting trailcam flag...");
+      preferences.putBool("monitoring", true);
+      isMonitoring = true;
+      preferences.end();
+
+      // Wait for PIR sensor to settle (go LOW) after power-on so it doesn't immediately trigger a photo
+      pinMode(PIR_SENSOR_PIN, INPUT_PULLDOWN);
+      int timeout = 150; // 15 seconds max timeout
+      while (digitalRead(PIR_SENSOR_PIN) == HIGH && timeout > 0) {
+        delay(100);
+        timeout--;
+      }
+      sleepNow();
+    } else {
+      Serial.println("Trailcam flag was not set. Entering webserver setup mode...");
+      isMonitoring = false;
+      preferences.end();
+    }
   }
 
   // 2.  Camera Configuration
@@ -255,6 +306,7 @@ void setup() {
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
     Serial.printf("Camera init failed with error 0x%x", err);
+    blinkLED(10, 50); // 10 extremely fast blinks to show camera error
     // If monitoring, we still want to log that we woke up but failed
     if (isMonitoring) {
         logHeartbeat(); 
@@ -301,6 +353,13 @@ void setup() {
         Serial.printf("Time synced to: %u\n", timestamp);
       }
       isMonitoring = true;
+
+      // Save trailcam flag to NVS so it persists across power cycles
+      Preferences preferences;
+      preferences.begin("trailcam", false);
+      preferences.putBool("monitoring", true);
+      preferences.end();
+
       server.send(200, "text/plain", "Monitoring starting...");
       delay(1000);
       sleepNow();
@@ -308,6 +367,7 @@ void setup() {
 
     server.begin();
     Serial.println("WiFi Server Started");
+    blinkLED(5, 100); // 5 fast blinks to show setup mode AP/server is running
   } else {
  
     s->set_whitebal(s, 1);       // Enable AWB
@@ -324,6 +384,15 @@ void setup() {
 
     fb = esp_camera_fb_get();
     if (fb) {
+      // Wait for the PIR sensor to go LOW (settle) before mounting the SD card
+      // to prevent any signal transitions on GPIO 12 during SD card initialization.
+      pinMode(PIR_SENSOR_PIN, INPUT_PULLDOWN);
+      int settleTimeout = 50; // 5 seconds max timeout
+      while (digitalRead(PIR_SENSOR_PIN) == HIGH && settleTimeout > 0) {
+        delay(100);
+        settleTimeout--;
+      }
+
       saveToSD(fb);
       esp_camera_fb_return(fb);
     } else {
@@ -337,9 +406,20 @@ void setup() {
 
 
 void sleepNow() {
+  // Indication that we are about to enter sleep: 1-second dim pulse
+  pinMode(FLASH_LED_PIN, OUTPUT);
+  analogWrite(FLASH_LED_PIN, 4); // Very dim pulse
+  delay(1000);
+  analogWrite(FLASH_LED_PIN, 0);
+  pinMode(FLASH_LED_PIN, INPUT);  // Release pin
+
   // Prepare for Sleep
-  // Using 1-bit SD mode frees up GPIO 13 for the PIR
   esp_sleep_enable_ext0_wakeup((gpio_num_t)PIR_SENSOR_PIN, 1);
+
+  // Disable internal pull-up and enable internal pull-down on the PIR pin during deep sleep
+  // to keep the pin LOW when the diode is blocked, preventing false triggers.
+  rtc_gpio_pullup_dis((gpio_num_t)PIR_SENSOR_PIN);
+  rtc_gpio_pulldown_en((gpio_num_t)PIR_SENSOR_PIN);
 
   // Wake every hour (3600 seconds) to log heartbeat
   uint64_t sleepTime = 3600ULL * 1000000ULL; 
