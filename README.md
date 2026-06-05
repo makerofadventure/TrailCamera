@@ -27,6 +27,23 @@ Once the device is physically deployed and armed via the web interface:
 ## Why Deep Sleep?
 Trail cameras are typically deployed outdoors and rely completely on battery power for weeks or months at a time. If the processor and camera were running continuously, the batteries would die in a matter of hours. By utilizing **deep sleep**, the microcontroller shuts down non-essential internal clocks and peripherals (like the camera and SD card reader), dropping its power draw to mere microamps. It only consumes significant power for the brief moments it is awake to take a picture, massively extending the battery life of the device.
 
+## Power-On Behavior & Setup Entry
+When the camera is cold-booted (power switch turned ON):
+1. **Initial Boot Latency (7–10 seconds of silence):** Upon powering on, **the camera will appear completely dead for 7 to 10 seconds** (no LED activity). This is because the PIR sensor requires time to stabilize, during which it holds its output HIGH and pulls **GPIO 12** (the ESP32's flash voltage strapping pin) HIGH. This forces the ESP32 into a silent temporary boot loop. Once the PIR warms up and goes LOW, the ESP32 boots normally. This 7-10 second silent pause is completely normal.
+2. **Setup Mode Entry Window (1 second of lit LED):** Immediately after the 7-10 second silent pause, the Flash LED will turn on dimly for **exactly 1 second**. 
+   * **To enter Setup Mode (Wi-Fi AP):** You must turn the power switch **OFF while this LED is active (lit)**, and then turn it back ON. On the next boot, the camera will enter Setup Mode and broadcast `TrailCam_Setup`.
+   * **To stay in Monitoring Mode:** Do nothing. After the 1-second window, the LED turns off, the camera waits for the PIR sensor to settle, and then enters low-power deep sleep.
+
+## Blink Codes (White Flash LED)
+The camera uses the built-in white Flash LED (configured at a very dim brightness to protect your eyes) to indicate its status:
+* **1 blink:** Heartbeat logged (hourly timer wake, appends to `heartbeat.txt`).
+* **2 blinks:** Photo successfully captured and saved to the SD card.
+* **3 blinks:** Motion detected (PIR wakeup trigger).
+* **4 blinks:** SD Card mount/save failure.
+* **5 blinks:** Webserver setup mode starting (SSID `TrailCam_Setup`).
+* **10 fast blinks:** Camera initialization error.
+* **1-second solid dim pulse:** Device is entering deep sleep mode.
+
 ## Wiring & Pinouts
 Wire up the components as detailed below, then compile and upload the software using the Arduino IDE. 
 
