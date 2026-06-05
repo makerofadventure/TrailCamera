@@ -35,7 +35,7 @@ Wire up the components as detailed below, then compile and upload the software u
 | **Power System** | `5V` / `GND`| Powered by 6V (4x AA batteries) connected to the board |
 | **PIR Sensor VCC** | `3.3V` | Powered from the ESP32 3.3V pin |
 | **PIR Sensor GND** | `GND` | Ground connection |
-| **PIR Sensor Out** | `Pin 13` | Hardware interrupt to wake the board from deep sleep |
+| **PIR Sensor Out** | `Pin 12` | Hardware interrupt to wake the board from deep sleep |
 | **SD Card & Camera**| `Built-in`| Using the ESP32-CAM's onboard micro SD slot (1-bit mode) and camera |
 
 ![Circuit Layout](Trailcam_bb.jpg)
